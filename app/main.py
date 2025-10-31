@@ -4,11 +4,14 @@ from sqlalchemy.orm import Session
 from .db import SessionLocal, engine, Base
 from .models import Note
 from .schemas import NoteIn, NoteOut
+from .admin import router as admin_router
 
 # auto-create tables for learning/dev
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Basic Postgres Demo")
+app.include_router(admin.router)
+app.include_router(notes.router)
 
 def get_db():
     db = SessionLocal()
