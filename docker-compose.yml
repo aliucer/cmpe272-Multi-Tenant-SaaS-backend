@@ -1,6 +1,22 @@
-version: '3.8'
+##version: '3.8'
 
 services:
+  api:
+    build: .
+    container_name: cmpe272_api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # FastAPI service
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8000:8000"
+    # Automatically load environment variables from .env
+    env_file:
+      - .env
+    # Optional: if you want hot reload in dev
+    volumes:
+      - .:/app
   postgres:
     image: postgres:15
     container_name: cmpe272_postgres

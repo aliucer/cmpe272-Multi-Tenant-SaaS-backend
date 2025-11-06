@@ -6,6 +6,10 @@ from .db import SessionLocal, engine, Base, redis_client
 from .models import Note
 from .schemas import NoteIn, NoteOut
 import logging
+from . import admin 
+
+app = FastAPI(title="Notes API with Admin")
+app.include_router(admin.router)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
