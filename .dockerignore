@@ -1,0 +1,16 @@
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pytest_cache
+.git
+.gitignore
+.env
+.env.*
+test.db
+dist
+build
+.vscode
+.idea
+cam_commands.txt

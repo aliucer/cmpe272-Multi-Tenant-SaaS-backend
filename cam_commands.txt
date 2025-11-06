@@ -1,0 +1,19 @@
+Run app: uvicorn app.main:app --reload
+- Then visit http://127.0.0.1:8000/health to test
+
+Activate environment: source .venv/bin/Activate
+
+Add Dependencies in requirements.txt: pip install -r requirements.txt
+
+Run tests: pytest -q
+
+Check Files within Docker Container:
+- docker run -d --name saas_test saas-api:dev sleep infinity
+- docker exec -it saas_test bash
+
+Docker Compose:
+- docker compose up : Builds (if needed) and starts all containers
+- docker compose down : Stops and removes containers, network, but keeps volumes
+- docker compose logs : shows live logs from all containers
+- docker compose exec api pytest : Runs pytest inside API container
+- docker compose ps : shows status and health of each service
