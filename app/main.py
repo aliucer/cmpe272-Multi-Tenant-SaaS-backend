@@ -1,13 +1,13 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.openapi.utils import get_openapi
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
+from . import admin, auth
 from .db import SessionLocal, engine, Base, redis_client
-from .models import Note
+from .models import User, Note
 from .schemas import NoteIn, NoteOut
 import logging
-from . import admin, auth
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -42,8 +42,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Basic Postgres Demo", lifespan=lifespan)
 
+# --- Routers ---
 app.include_router(admin.router)
-app.include_router(auth.router)
+app.include_router(auth.router)   # authentication routes
 
 def custom_openapi():
     if app.openapi_schema:
@@ -65,7 +66,7 @@ def custom_openapi():
     protected_routes = [
         "/admin/ping",
         "/auth/me",
-        "notes"
+        "/notes"
     ]  # add more as needed
 
     for path, path_item in openapi_schema["paths"].items():
@@ -109,13 +110,39 @@ def health(db: Session = Depends(get_db)):
     }
 
 @app.get("/notes", response_model=list[NoteOut])
-def list_notes(db: Session = Depends(get_db)):
-    return db.query(Note).order_by(Note.id).all()
+def list_notes(
+    db: Session = Depends(get_db),
+    current_user = Depends(auth.get_current_user),
+    ):
+    return db.query(Note).filter(Note.user_id == current_user.id).order_by(Note.id).all()
 
 @app.post("/notes", response_model=NoteOut, status_code=201)
-def create_note(payload: NoteIn, db: Session = Depends(get_db)):
-    note = Note(text=payload.text)
+def create_note(
+    payload: NoteIn, 
+    db: Session = Depends(get_db),
+    current_user = Depends(auth.get_current_user),
+    ):
+    '''
+    note = Note(text=payload.text, user_id = current_user.id)
     db.add(note)
     db.commit()
     db.refresh(note)
     return note
+    '''
+    from fastapi import HTTPException
+
+    if not current_user:
+        raise HTTPException(status_code=401, detail="User not authenticated")
+
+    logger.info(f"Creating note for user_id={current_user.id}, text={payload.text}")
+
+    try:
+        note = Note(text=payload.text, user_id=current_user.id)
+        db.add(note)
+        db.commit()
+        db.refresh(note)
+        return note
+    except Exception as e:
+        logger.error(f"❌ Failed to create note: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating note: {str(e)}")
