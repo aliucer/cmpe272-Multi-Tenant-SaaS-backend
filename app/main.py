@@ -1,3 +1,4 @@
+import uuid
 from passlib.context import CryptContext
 pwd_ctx = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 from fastapi import FastAPI, Depends, HTTPException, Header, Request
@@ -64,10 +65,19 @@ app = FastAPI(title="Multi-Tenant SaaS API", lifespan=lifespan)
 # ---------------------------
 # Auth helpers (JWT)
 # ---------------------------
-def create_access_token(user_id: str, tenant_id: str, expires_in: int = 3600) -> str:
-    exp = datetime.datetime.utcnow() + datetime.timedelta(seconds=expires_in)
-    payload = {"sub": user_id, "tenant_id": tenant_id, "exp": exp}
-    return jwt.encode(payload, SECRET, algorithm="HS256")
+def create_access_token(user_id, tenant_id, ttl=3600):
+    exp = datetime.datetime.utcnow() + datetime.timedelta(seconds=ttl)
+    return jwt.encode({"sub": user_id, "tenant_id": tenant_id, "exp": exp}, SECRET, algorithm="HS256")
+
+def mint_refresh_token(user_id, tenant_id, ttl=60*60*24*7):
+    jti = str(uuid.uuid4())
+    key = f"rt:{jti}"
+    redis_client.set(key, f"{user_id}:{tenant_id}", ex=ttl)
+    return jti
+
+def revoke_refresh_token(jti): redis_client.delete(f"rt:{jti}")
+
+def is_refresh_valid(jti): return redis_client.exists(f"rt:{jti}") == 1
 
 def decode_access_token(token: str) -> dict:
     return jwt.decode(token, SECRET, algorithms=["HS256"])
@@ -90,6 +100,18 @@ def get_db_jwt(user=Depends(get_current_user)):
     finally:
         db.close()
 
+def require_role(*roles):
+    def dep(user=Depends(get_current_user)):
+        with SessionLocal() as db:
+            db.execute(text("SET LOCAL app.current_tenant = :tid"), {"tid": user["tenant_id"]})
+            row = db.execute(
+                text("SELECT role FROM users WHERE id=:uid LIMIT 1"),
+                {"uid": user["user_id"]}
+            ).fetchone()
+            if not row or row.role not in roles:
+                raise HTTPException(status_code=403, detail="Forbidden")
+        return user
+    return dep
 # ---------------------------
 # Health
 # ---------------------------
@@ -162,12 +184,26 @@ def create_tenant(body: TenantCreate):
 
     return TenantCreated(tenant_id=UUID(tenant_id))
 
+@app.post("/auth/refresh", response_model=TokenOut)
+def refresh(jti: str):
+    if not is_refresh_valid(jti): raise HTTPException(401, "Invalid refresh")
+    # parse stored user_id:tenant_id and mint new access
+    val = redis_client.get(f"rt:{jti}")
+    user_id, tenant_id = val.split(":")
+    return TokenOut(access_token=create_access_token(user_id, tenant_id, 3600), token_type="bearer", expires_in=3600)
+
+@app.post("/auth/logout")
+def logout(jti: str):
+    revoke_refresh_token(jti)
+    return OkOut(ok=True)
+
 # ---------------------------
 # Login
 # ---------------------------
+
 @app.post("/auth/login", response_model=TokenOut, tags=["auth"])
 def login(body: LoginIn, x_tenant_id: str = Header(..., alias="X-Tenant-Id")):
-    # validate tenant header
+    rate_limit(f"login:{x_tenant_id}:{body.email}", limit=10, window=300)   # validate tenant header
     try:
         UUID(x_tenant_id)
     except Exception:
@@ -186,23 +222,18 @@ def login(body: LoginIn, x_tenant_id: str = Header(..., alias="X-Tenant-Id")):
         if not pwd_ctx.verify(body.password, row.password_hash):
             raise HTTPException(status_code=401, detail="Invalid credentials")
         token = create_access_token(user_id=str(row.id), tenant_id=x_tenant_id, expires_in=3600)
-        return TokenOut(access_token=token, token_type="bearer", expires_in=3600)
+        return TokenOut(
+            access_token=create_access_token(str(row.id), x_tenant_id, 3600),
+            token_type="bearer",
+            expires_in=3600,
+        )
 
-# ---------------------------
-# Notes (GET/POST) — cache GET
-# ---------------------------
+
 @app.get("/notes", response_model=List[NoteOut], tags=["notes"])
-def list_notes(user=Depends(get_current_user), db: Session = Depends(get_db_jwt)):
-    cache_key = f"tenant:{user['tenant_id']}:notes"
-    cached = redis_client.get(cache_key)
-    if cached:
-        return json.loads(cached)
-    from fastapi.encoders import jsonable_encoder
-    rows = db.query(Note).order_by(Note.created_at.desc()).all()
-    payload = [NoteOut.model_validate(r).model_dump() for r in rows]
-    payload = jsonable_encoder(payload)
-    redis_client.set(cache_key, json.dumps(payload), ex=60)
-    return payload
+def list_notes(limit: int = 50, offset: int = 0, user=Depends(get_current_user), db: Session = Depends(get_db_jwt)):
+    limit = min(max(limit, 1), 100)
+    rows = db.query(Note).order_by(Note.created_at.desc()).limit(limit).offset(offset).all()
+    return [NoteOut.model_validate(r) for r in rows]
 
 @app.post("/notes", response_model=NoteOut, status_code=201, tags=["notes"])
 def create_note(payload: NoteIn, user=Depends(get_current_user), db: Session = Depends(get_db_jwt)):
@@ -212,14 +243,18 @@ def create_note(payload: NoteIn, user=Depends(get_current_user), db: Session = D
     db.refresh(note)    # still same txn; RLS ok because SET LOCAL is active
     out = NoteOut.model_validate(note)
     db.commit()         # commit after we have the data
-    redis_client.delete(f"tenant:{user['tenant_id']}:notes")
     return out
 
+def rate_limit(key: str, limit=300, window=60):
+    bucket = f"rl:{key}:{int(time.time()//window)}"
+    n = redis_client.incr(bucket)
+    if n == 1: redis_client.expire(bucket, window)
+    if n > limit: raise HTTPException(status_code=429, detail="Too many requests")
 
 # ---------------------------
 # Users (optional list)
 # ---------------------------
-@app.get("/users", response_model=List[UserOut], tags=["users"])
+@app.get("/users", response_model=List[UserOut], tags=["users"], dependencies=[Depends(require_role("admin"))])
 def list_users(db: Session = Depends(get_db_jwt)):
     rows = db.query(User).order_by(User.created_at.desc()).all()
     return [UserOut.model_validate(r) for r in rows]
