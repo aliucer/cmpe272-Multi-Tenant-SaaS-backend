@@ -1,6 +1,27 @@
-version: '3.8'
+##version: '3.8'
 
 services:
+  api:
+    build: .
+    container_name: cmpe272_api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app
+    # to hot reload in dev
+    volumes:
+      - ./app:/app/app
+    # FastAPI service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    # Automatically load environment variables from .env
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1              # ensures logs appear instantly
+      - WATCHFILES_FORCE_POLLING=true   # improves reload detection in Docker Desktop
   postgres:
     image: postgres:15
     container_name: cmpe272_postgres
