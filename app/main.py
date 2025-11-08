@@ -7,7 +7,7 @@ from .db import SessionLocal, engine, Base, redis_client
 from .models import Note
 from .schemas import NoteIn, NoteOut
 import logging
-from . import admin, auth
+from . import admin, auth, billing
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,6 +44,7 @@ app = FastAPI(title="Basic Postgres Demo", lifespan=lifespan)
 
 app.include_router(admin.router)
 app.include_router(auth.router)
+app.include_router(billing.router)
 
 def custom_openapi():
     if app.openapi_schema:
@@ -65,7 +66,8 @@ def custom_openapi():
     protected_routes = [
         "/admin/ping",
         "/auth/me",
-        "notes"
+        "/billing/create-checkout-session",
+        "/notes"
     ]  # add more as needed
 
     for path, path_item in openapi_schema["paths"].items():
