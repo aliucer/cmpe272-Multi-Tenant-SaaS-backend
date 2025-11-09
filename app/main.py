@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
 from typing import List
 import os, json, datetime, logging, jwt
+import time
 
 from .db import SessionLocal, engine, Base, redis_client, set_current_tenant
 from .models import Note, User, Tenant
@@ -221,12 +222,10 @@ def login(body: LoginIn, x_tenant_id: str = Header(..., alias="X-Tenant-Id")):
             raise HTTPException(status_code=401, detail="Invalid credentials")
         if not pwd_ctx.verify(body.password, row.password_hash):
             raise HTTPException(status_code=401, detail="Invalid credentials")
-        token = create_access_token(user_id=str(row.id), tenant_id=x_tenant_id, expires_in=3600)
-        return TokenOut(
-            access_token=create_access_token(str(row.id), x_tenant_id, 3600),
-            token_type="bearer",
-            expires_in=3600,
-        )
+        access = create_access_token(str(row.id), x_tenant_id, 3600)
+        jti = mint_refresh_token(str(row.id), x_tenant_id)  # see "refresh token" below
+        return TokenOut(access_token=access, token_type="bearer", expires_in=3600, refresh_token=jti)
+
 
 
 @app.get("/notes", response_model=List[NoteOut], tags=["notes"])
@@ -269,7 +268,7 @@ async def stripe_webhook(request: Request):
         logger.warning("Stripe webhook received but STRIPE_WEBHOOK_SECRET is not set; skipping verify.")
         return OkOut(ok=True)
 
-    payload = await request.body()
+    payload = (await request.body()).decode("utf-8")
     sig = request.headers.get("Stripe-Signature", "")
     try:
         stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
