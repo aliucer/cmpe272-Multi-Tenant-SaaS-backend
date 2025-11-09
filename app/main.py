@@ -1,5 +1,4 @@
 from fastapi import FastAPI, Depends, HTTPException
-from fastapi.openapi.utils import get_openapi
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
@@ -7,11 +6,11 @@ from .db import SessionLocal, engine, Base, redis_client
 from .models import Note
 from .schemas import NoteIn, NoteOut
 import logging
-from . import admin, auth
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 # auto-create tables for learning/dev
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,44 +40,6 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
 
 app = FastAPI(title="Basic Postgres Demo", lifespan=lifespan)
-
-app.include_router(admin.router)
-app.include_router(auth.router)
-
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    openapi_schema = get_openapi(
-        title=app.title,
-        version="1.0.0",
-        description="API with JWT-based authentication",
-        routes=app.routes,
-    )
-    openapi_schema["components"]["securitySchemes"] = {
-        "BearerAuth": {
-            "type": "http",
-            "scheme": "bearer",
-            "bearerFormat": "JWT",
-        }
-    }
-        # Only protect selected routes
-    protected_routes = [
-        "/admin/ping",
-        "/auth/me",
-        "notes"
-    ]  # add more as needed
-
-    for path, path_item in openapi_schema["paths"].items():
-        for method in path_item.values():
-            if path in protected_routes:
-                method["security"] = [{"BearerAuth": []}]
-            else:
-                method["security"] = []
-                
-    app.openapi_schema = openapi_schema
-    return app.openapi_schema
-
-app.openapi = custom_openapi
 
 def get_db():
     db = SessionLocal()
