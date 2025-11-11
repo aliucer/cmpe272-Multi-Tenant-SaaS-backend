@@ -29,3 +29,4 @@ def set_current_tenant(db_session, tenant_id: str | None):
         db_session.execute(text("SET LOCAL app.current_tenant = :tid"), {"tid": tenant_id})
     else:
         db_session.execute(text("RESET app.current_tenant"))
+

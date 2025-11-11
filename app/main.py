@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from typing import List
 import os, json, datetime, logging, jwt
 import time
+from fastapi import Body
 
 from .db import SessionLocal, engine, Base, redis_client, set_current_tenant
 from .models import Note, User, Tenant
@@ -33,7 +34,12 @@ logger = logging.getLogger(__name__)
 SECRET = os.getenv("SECRET_KEY", "dev-secret")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+PRICE_ID = os.getenv("STRIPE_PRICE_ID")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+FROM_EMAIL = os.getenv("SENDGRID_FROM", "noreply@example.com")
 
+print("SENDGRID_API_KEY:", bool(os.getenv("SENDGRID_API_KEY")))
+print("SENDGRID_FROM:", os.getenv("SENDGRID_FROM"))
 # ---------------------------
 # App lifespan
 # ---------------------------
@@ -75,6 +81,8 @@ def mint_refresh_token(user_id, tenant_id, ttl=60*60*24*7):
     key = f"rt:{jti}"
     redis_client.set(key, f"{user_id}:{tenant_id}", ex=ttl)
     return jti
+
+
 
 def revoke_refresh_token(jti): redis_client.delete(f"rt:{jti}")
 
@@ -169,13 +177,14 @@ def create_tenant(body: TenantCreate):
                 """),
                 {"tid": tenant_id, "email": body.admin_email, "ph": pwd_ctx.hash(body.admin_password)},
             )
+            
 
     # (optional) welcome email
     if SENDGRID_API_KEY:
         try:
             sg = SendGridAPIClient(api_key=SENDGRID_API_KEY)
             sg.send(Mail(
-                from_email="noreply@example.com",
+                from_email=FROM_EMAIL,
                 to_emails=body.admin_email,
                 subject=f"Welcome to {body.name}",
                 plain_text_content="Your tenant is ready."
@@ -271,9 +280,84 @@ async def stripe_webhook(request: Request):
     payload = (await request.body()).decode("utf-8")
     sig = request.headers.get("Stripe-Signature", "")
     try:
-        stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
+        event = stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid signature")
+    etype = event["type"]
+    data = event["data"]["object"]
+
+    if etype == "payment_intent.succeeded":
+        tid = (data.get("metadata") or {}).get("tenant_id")
+        amt = data.get("amount_received")
+        currency = data.get("currency")
+        logger.info(f"✅ One-time payment succeeded for tenant={tid} amount={amt} {currency}")
+    # (optional) update your DB if you add a 'last_payment_at' column later
 
     # You can parse and react to event types here if you want.
     return OkOut(ok=True)
+
+@app.post("/billing/checkout", tags=["billing"])
+def create_one_time_checkout_session(
+    user=Depends(get_current_user),           # reads JWT with tenant_id
+    db: Session = Depends(get_db_jwt),        # 🔑 sets app.current_tenant for THIS DB session
+):
+    if not stripe.api_key:
+        raise HTTPException(status_code=500, detail="Stripe not configured (STRIPE_API_KEY)")
+    if not PRICE_ID:
+        raise HTTPException(status_code=500, detail="STRIPE_PRICE_ID not set")
+
+    tenant_id = user["tenant_id"]
+
+    # RLS is active on this db session; this SELECT can see only current tenant rows
+    row = db.execute(
+        text("SELECT stripe_customer_id, name FROM tenants WHERE id=:id"),
+        {"id": tenant_id},
+    ).mappings().fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    customer_id = row["stripe_customer_id"]
+    tenant_name = row["name"]
+
+    if not customer_id:
+        cust = stripe.Customer.create(name=tenant_name, metadata={"tenant_id": tenant_id})
+        db.execute(text("UPDATE tenants SET stripe_customer_id=:cid WHERE id=:id"),
+                   {"cid": cust.id, "id": tenant_id})
+        db.commit()
+        customer_id = cust.id
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",                         # one-time price
+            customer=customer_id,
+            line_items=[{"price": PRICE_ID, "quantity": 1}],
+            success_url=f"{BACKEND_URL}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{BACKEND_URL}/billing/cancel",
+            metadata={"tenant_id": tenant_id, "tenant_name": tenant_name},
+            payment_intent_data={
+                "metadata": {"tenant_id": tenant_id, "tenant_name": tenant_name}
+            },
+        )
+        return {"url": session.url}
+    except Exception as e:
+        logger.exception("Stripe Checkout create failed")
+        raise HTTPException(status_code=502, detail=f"Stripe error: {e}")
+
+@app.get("/billing/success", tags=["billing"])
+def billing_success(session_id: str):
+    # Minimal success handler so the redirect lands somewhere;
+    # also confirms payment status without webhooks.
+    try:
+        sess = stripe.checkout.Session.retrieve(session_id, expand=["payment_intent"])
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "payment_status": sess.payment_status,          # "paid" when done
+            "payment_intent": getattr(sess.payment_intent, "id", None),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Cannot retrieve session: {e}")
+
+@app.get("/billing/cancel", tags=["billing"])
+def billing_cancel():
+    return {"ok": False, "reason": "checkout canceled"}
