@@ -28,7 +28,8 @@ class LoginIn(BaseModel):
 class TokenOut(BaseModel):
     access_token: str
     token_type: Literal["bearer"]
-    expires_in: int  # seconds
+    expires_in: int
+    refresh_token: str | None = None  # simple addition for refresh token support
 
 # (reference only; not returned by an endpoint)
 class JWTClaims(BaseModel):
