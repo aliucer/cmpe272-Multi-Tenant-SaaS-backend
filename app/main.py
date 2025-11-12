@@ -10,17 +10,17 @@ from typing import List
 import os, json, datetime, logging, jwt
 import time
 from fastapi import Body
-
-from .db import SessionLocal, engine, Base, redis_client, set_current_tenant
-from .models import Note, User, Tenant
+from sqlalchemy.exc import IntegrityError
 from .schemas import (
     HealthOut, OkOut,
     TenantCreate, TenantCreated,
     LoginIn, TokenOut,
     NoteIn, NoteOut,
-    UserOut,
+    UserOut, UserCreate,
     StripeEventIn,
 )
+from .db import SessionLocal, engine, Base, redis_client, set_current_tenant
+from .models import Note, User, Tenant
 
 # Optional external services (Stripe/SendGrid) — install via requirements.txt
 import stripe
@@ -361,3 +361,30 @@ def billing_success(session_id: str):
 @app.get("/billing/cancel", tags=["billing"])
 def billing_cancel():
     return {"ok": False, "reason": "checkout canceled"}
+
+@app.post("/users", response_model=UserOut, tags=["users"], dependencies=[Depends(require_role("admin"))])
+def create_user(body: UserCreate, db: Session = Depends(get_db_jwt)):
+    """
+    Create a user inside the *current tenant*.
+    RLS is active thanks to get_db_jwt -> SET LOCAL app.current_tenant.
+    We explicitly set tenant_id from current_setting(...) to satisfy RLS WITH CHECK.
+    """
+    try:
+        row = db.execute(
+            text("""
+                INSERT INTO users (tenant_id, email, password_hash, role)
+                VALUES (current_setting('app.current_tenant', true)::uuid, :email, :ph, :role)
+                RETURNING id, tenant_id, email, role, created_at
+            """),
+            {
+                "email": body.email,
+                "ph": pwd_ctx.hash(body.password),
+                "role": body.role,
+            },
+        ).mappings().one()
+        db.commit()
+        return UserOut.model_validate(row)
+    except IntegrityError:
+        db.rollback()
+        # UNIQUE (tenant_id, email) → duplicate within this tenant
+        raise HTTPException(status_code=409, detail="User with this email already exists in this tenant")

@@ -16,7 +16,12 @@ class TenantCreate(BaseModel):
     name: str
     admin_email: EmailStr
     admin_password: str
-
+    
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+    role: Literal["user", "admin"] = "user"  # default non-admin
+    
 class TenantCreated(BaseModel):
     tenant_id: UUID
 
