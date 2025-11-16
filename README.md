@@ -39,6 +39,11 @@ A minimal FastAPI backend demo for note-taking, using PostgreSQL and SQLAlchemy 
 - Tables are auto-created on startup for dev; no migrations are configured.
 - Multi-tenancy and authentication are **not** implemented yet.
 - For production, add migrations (e.g., Alembic) and proper secrets management.
-
-## License
-MIT
+- 
+## Benchmark Result (Updated)
+- POST /auth/login: 8 requests avg 441 ms; p50 441 ms; p95 455 ms; max 459 ms
+- POST /notes: 20 requests avg 457 ms; p50 455 ms; p95 478 ms; max 548 ms 
+- GET /notes?limit=10: 20 requests avg 334 ms; p50 329 ms; p95 364 ms; max 396 ms 
+- GET /users: 10 requests avg 634 ms; p50 631 ms; p95 662 ms; max 673 ms
+- GET /health: 426 ms
+- POST/tenants: 1,639 ms
